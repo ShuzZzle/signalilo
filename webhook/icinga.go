@@ -59,6 +59,7 @@ func computeServiceName(
 	hash := sha256.New()
 	// use bridge uuid to ensure we can't accidentally touch another
 	// instance's services
+	// TODO: Evaluate! This is might a problem. Theoretically UUID is not needed since the Labels of Alert are always different because they contain unique clusterID information
 	_, _ = hash.Write([]byte(c.GetConfig().UUID))
 	_, _ = hash.Write([]byte(mapToStableString(alert.Labels)))
 	// 8 bytes gives us 16 characters
@@ -190,13 +191,13 @@ func updateOrCreateService(icinga icinga2.Client,
 	// update or create service, depending on whether object exists
 	if err == nil {
 		l.Infof("updating service: %+v\n", icingaSvc.Name)
-		err := icinga.UpdateService(serviceData)
+		err = icinga.UpdateService(serviceData)
 		if err != nil {
 			return serviceData, err
 		}
 	} else if status > 0 {
 		l.Infof("creating service: %+v\n", serviceName)
-		err := icinga.CreateService(serviceData)
+		err = icinga.CreateService(serviceData)
 		if err != nil {
 			return serviceData, err
 		}
