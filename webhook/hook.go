@@ -12,6 +12,7 @@ package webhook
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/bketelsen/logr"
 	"net/http"
 	"os"
 	"strings"
@@ -63,35 +64,35 @@ func checkBearerToken(r *http.Request, c config.Configuration) error {
 }
 
 // Webhook handles incoming webhook HTTP requests
-func Webhook(w http.ResponseWriter, r *http.Request, c config.Configuration) {
-	defer r.Body.Close()
+func Webhook(writer http.ResponseWriter, request *http.Request, configuration config.Configuration) {
+	defer request.Body.Close()
 
-	l := c.GetLogger()
+	l := configuration.GetLogger()
 	if l == nil {
 		panic("logger is nil")
 	}
 
-	if err := checkBearerToken(r, c); err != nil {
+	if err := checkBearerToken(request, configuration); err != nil {
 		l.Errorf("Checking webhook authentication: %v", err)
-		asJSON(w, http.StatusUnauthorized, err.Error())
+		asJSON(writer, http.StatusUnauthorized, err.Error())
 		return
 	}
 
-	icinga := c.GetIcingaClient()
+	icinga := configuration.GetIcingaClient()
 	if icinga == nil {
 		panic("icinga client is nil")
 	}
 
 	// Godoc: https://godoc.org/github.com/prometheus/alertmanager/template#Data
 	data := template.Data{}
-	if err := json.NewDecoder(r.Body).Decode(&data); err != nil {
+	if err := json.NewDecoder(request.Body).Decode(&data); err != nil {
 		l.Errorf("Unable to decode request")
-		asJSON(w, http.StatusBadRequest, err.Error())
+		asJSON(writer, http.StatusBadRequest, err.Error())
 		return
 	}
 	l.Infof("Alerts: GroupLabels=%v, CommonLabels=%v", data.GroupLabels, data.CommonLabels)
 
-	serviceHost := c.GetConfig().HostName
+	serviceHost := configuration.GetConfig().HostName
 	l.V(2).Infof("Check service host: %v", serviceHost)
 	host, err := icinga.GetHost(serviceHost)
 	if err != nil {
@@ -108,58 +109,75 @@ func Webhook(w http.ResponseWriter, r *http.Request, c config.Configuration) {
 	}
 
 	for _, alert := range data.Alerts {
-		l.V(2).Infof("Processing %v alert: alertname=%v, severity=%v, message=%v",
-			alert.Status,
-			alert.Labels["alertname"],
-			alert.Labels["severity"],
-			alert.Annotations["message"])
-
-		// Compute service and display name for alert
-		serviceName, err := computeServiceName(data, alert, c)
+		err = processAlert(l, alert, configuration, icinga, serviceHost)
 		if err != nil {
-			l.Errorf("Unable to compute internal service name: %v", err)
-		}
-		displayName, err := computeDisplayName(data, alert)
-		if err != nil {
-			l.Errorf("Unable to compute service display name: %v", err)
-		}
-
-		// Update or create service in icinga
-		svc, err := updateOrCreateService(icinga, serviceHost, serviceName, displayName, alert, c)
-		if err != nil {
-			l.Errorf("Error in checkOrCreateService for %v: %v", serviceName, err)
-		}
-		// If we got an emtpy service object, the service was not
-		// created, don't try to call process-check-result
-		if svc.Name == "" {
-			continue
-		}
-
-		exitStatus := severityToExitStatus(alert.Status, alert.Labels["severity"], c.GetConfig().MergedSeverityLevels)
-		if svc.EnableActiveChecks {
-			// override exitStatus for sending heartbeat
-			exitStatus = 0
-		}
-		l.V(2).Infof("Executing ProcessCheckResult on icinga2 for %v: exit status %v",
-			serviceName, exitStatus)
-
-		// Get the Plugin Output from the first Annotation we find that has some data
-		pluginOutput := ""
-		for _, v := range c.GetConfig().AlertManagerConfig.PluginOutputAnnotations {
-			pluginOutput = alert.Annotations[v]
-			if pluginOutput != "" {
-				break
-			}
-		}
-
-		err = icinga.ProcessCheckResult(svc, icinga2.Action{
-			ExitStatus:   exitStatus,
-			PluginOutput: pluginOutput,
-		})
-		if err != nil {
-			l.Errorf("Error in ProcessCheckResult for %v: %v", serviceName, err)
+			l.Errorf("error processing alert: %s", err.Error())
 		}
 	}
 
-	asJSON(w, http.StatusOK, "success")
+	asJSON(writer, http.StatusOK, "success")
+}
+
+func processAlert(l logr.Logger, alert template.Alert, c config.Configuration, icinga icinga2.Client, serviceHost string) error {
+	l.V(2).Infof("Processing %v alert: alertname=%v, severity=%v, message=%v",
+		alert.Status,
+		alert.Labels["alertname"],
+		alert.Labels["severity"],
+		alert.Annotations["message"])
+
+	// Check if serviceHost is set via Alert
+	if host, ok := alert.Labels["host"]; ok {
+		serviceHost = host
+	}
+
+	// Compute service and display name for alert
+	serviceName, err := computeServiceName(alert, c)
+	if err != nil {
+		l.Errorf("Unable to compute internal service name: %v", err)
+		return fmt.Errorf("unable to compute internal service name: %v", err)
+	}
+	displayName, err := computeDisplayName(alert)
+	if err != nil {
+		l.Errorf("Unable to compute service display name: %v", err)
+		return fmt.Errorf("unable to compute service display name: %v", err)
+	}
+
+	// Update or create service in icinga
+	svc, err := updateOrCreateService(icinga, serviceHost, serviceName, displayName, alert, c)
+	if err != nil {
+		l.Errorf("Error in checkOrCreateService for %v: %v", serviceName, err)
+		return fmt.Errorf("error in checkOrCreateService for %v: %v", serviceName, err)
+	}
+	// If we got an emtpy service object, the service was not
+	// created, don't try to call process-check-result
+	if svc.Name == "" {
+		return nil
+	}
+
+	exitStatus := severityToExitStatus(alert.Status, alert.Labels["severity"], c.GetConfig().MergedSeverityLevels)
+	if svc.EnableActiveChecks {
+		// override exitStatus for sending heartbeat
+		exitStatus = 0
+	}
+	l.V(2).Infof("Executing ProcessCheckResult on icinga2 for %v: exit status %v",
+		serviceName, exitStatus)
+
+	// Get the Plugin Output from the first Annotation we find that has some data
+	pluginOutput := ""
+	for _, v := range c.GetConfig().AlertManagerConfig.PluginOutputAnnotations {
+		pluginOutput = alert.Annotations[v]
+		if pluginOutput != "" {
+			break
+		}
+	}
+
+	err = icinga.ProcessCheckResult(svc, icinga2.Action{
+		ExitStatus:   exitStatus,
+		PluginOutput: pluginOutput,
+	})
+	if err != nil {
+		l.Errorf("Error in ProcessCheckResult for %v: %v", serviceName, err)
+		return fmt.Errorf("error in ProcessCheckResult for %v: %v", serviceName, err)
+	}
+	return nil
 }

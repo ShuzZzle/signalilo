@@ -138,6 +138,9 @@ Optional annotations:
 
 * `runbook_url`: mapped to `notes_url
 
+Optional labels:
+* `host`: replaces `--icinga_hostname` / `SIGNALILO_ICINGA_HOSTNAME` when specified
+
 Infered fields:
 
 * `generatorURL`: mapped to `action_url`
