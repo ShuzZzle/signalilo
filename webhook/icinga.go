@@ -50,7 +50,6 @@ func mapToStableString(data map[string]string) string {
 
 // computeServiceName computes the internal service name used for Icinga2
 func computeServiceName(
-	data template.Data,
 	alert template.Alert,
 	c config.Configuration) (string, error) {
 
@@ -79,7 +78,7 @@ func computeServiceName(
 }
 
 // computeDisplayName computes a "human-readable" display name for Icinga2
-func computeDisplayName(data template.Data, alert template.Alert) (string, error) {
+func computeDisplayName(alert template.Alert) (string, error) {
 	return alert.Labels["alertname"], nil
 }
 
